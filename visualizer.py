@@ -1,110 +1,131 @@
-import matplotlib.pyplot as plt # For Visualizations
-from matplotlib.widgets import Button, TextBox
-import osmnx as ox
-import contextily as ctx
-from graph import csuf_campus_map, csuf_locations
-from matplotlib.widgets import Button, TextBox
 import time
+from graph import csuf_campus_map, csuf_locations
+from matplotlib.widgets import TextBox
 from pyproj import Transformer
 import matplotlib.pyplot as plt
 import osmnx as ox
 import contextily as ctx
+from shapely.geometry import box
 import geopandas as gpd
-from shapely.geometry import Point, box
+from shapely.geometry import Point
 
 
 start_ax = plt.axes([0.075, 0.05, 0.2, 0.04])
 end_ax = plt.axes([0.35, 0.05, 0.2, 0.04])
 
-
 start_textbox = TextBox(start_ax, 'Start:')
 end_textbox = TextBox(end_ax, 'End:')
 
-def plot_exec_time(start_t, end_t):
-    et = plt.text(0.01, 0.01, f"Execution time: {end_t - start_t}", color='red', fontsize=12,
-                  transform=plt.gca().transAxes)
-    et.set_bbox(dict(facecolor='white', alpha=1, edgecolor='red'))
+# Store the text elements so we can clear them later
+exec_time_text = None
+dist_text = None
+walking_time_text = None
 
+def plot_exec_time(start_t, end_t):
+    global exec_time_text
+    if exec_time_text:
+        exec_time_text.remove()  # Clear previous text
+    exec_time_text = plt.text(1.50, .75, f"Execution time: {end_t - start_t}", color='blue', fontsize=12,
+                              transform=plt.gca().transAxes)
+    exec_time_text.set_bbox(dict(facecolor='white', alpha=1, edgecolor='blue'))
 
 def plot_dist(dist):
-    # in meters, source: google
+    global dist_text, walking_time_text
+    if dist_text:
+        dist_text.remove()  # Clear previous text
+    if walking_time_text:
+        walking_time_text.remove()  # Clear previous text
+
     avg_walking_speed = 1.42
     walking_time_min = (dist / avg_walking_speed) / 60
-    dt = plt.text(0.01, 0.06, f"Distance: {dist:.2f} meters", color='red', fontsize=12, transform=plt.gca().transAxes)
-    dt.set_bbox(dict(facecolor='white', alpha=1, edgecolor='red'))
-    tt = plt.text(0.01, 0.11, f"Estimated Walking Time: {walking_time_min:.2f} minutes", color='red', fontsize=12,
-                  transform=plt.gca().transAxes)
-    tt.set_bbox(dict(facecolor='white', alpha=1, edgecolor='red'))
+    dist_text = plt.text(1.50, 0.50, f"Distance: {dist:.2f} meters", color='blue', fontsize=12, transform=plt.gca().transAxes)
+    dist_text.set_bbox(dict(facecolor='white', alpha=1, edgecolor='blue'))
+    walking_time_text = plt.text(1.50, 0.25, f"Estimated Walking Time: {walking_time_min:.2f} minutes", color='blue', fontsize=12,
+                                 transform=plt.gca().transAxes)
+    walking_time_text.set_bbox(dict(facecolor='white', alpha=1, edgecolor='blue'))
+
 
 
 def err_invalid():
     start_textbox.set_val("Invalid")
     end_textbox.set_val("Invalid")
 
+def convert_coords(coords_list):
+    gdf = gpd.GeoDataFrame(geometry=[Point(x, y) for y, x in coords_list], crs="EPSG:4326")
+    gdf = gdf.to_crs(epsg=3857)  # Convert to Web Mercator or whatever projection your map uses
+    return [(point.x, point.y) for point in gdf.geometry]
 
-import time
-from tkinter import messagebox  # For displaying error messages
 
-
-def run_algo(graph, algo, start, end):
-    # Check if start and end nodes are in the graph
+def run_algo(graph, algo, start, end, fig, ax):
+    # Step 1: Validate the start and end nodes
     if start not in graph or end not in graph:
         print("Invalid start or end location.")
         return
 
-    # Start timing
+    # Step 2: Start timing for performance measurement
     s_t = time.perf_counter()
 
-    # Run the selected algorithm
-    dist, path = algo(graph, start, end)
+    # Step 3: Run the selected algorithm to find a path
+    result = algo(graph, start, end)
 
-    # End timing
-    e_t = time.perf_counter()
-
-    if path is None:
+    # Step 4: If result is None, exit and print a message
+    if result is None:
         print("No path found.")
         return
 
-    # Plot the path on the graph
-    plot_path(graph, path)
+    # Step 5: Handle result for different algorithms (BFS/DFS return path, Dijkstra returns tuple)
+    if isinstance(result, tuple):
+        dist, path = result  # For Dijkstra
+    else:
+        path = result
+        dist = len(path)  # Estimate distance for BFS/DFS based on path length
 
-    # Display the execution time and distance
-    plot_exec_time(s_t, e_t)
-    plot_dist(dist)
+    # Step 6: End timing
+    e_t = time.perf_counter()
 
-    plt.show()
+    # Step 7: Plot the path, execution time, and distance
+    if path:
+        # Clear any previous paths on `ax`
+        for line in ax.get_lines():
+            line.remove()
+
+        # Plot the new path on the existing map
+        plot_path(graph, path, ax)
+
+        # Plot execution time and distance information
+        plot_exec_time(s_t, e_t)
+        plot_dist(dist)
+
+        # Reattach hover functionality after updating the plot
+        on_hover(fig, ax, csuf_locations)
+
+        # Refresh the figure canvas to display updates
+        fig.canvas.draw_idle()
+    else:
+        print("Path not found between start and end.")
+
+
+def run_accessible_algo(graph, start, end, fig, ax):
+    if start not in graph or end not in graph:
+        print("Invalid start or end location.")
+        return
+
+    # Run accessible pathfinding
+    path = dijkstra_accessible(graph, start, end)
+    if path:
+        plot_path(graph, path, ax)  # Plot accessible path on the map
+    else:
+        print("No accessible path found between start and end.")
+
+    fig.canvas.draw_idle()  # Refresh the plot
+
 
 def clear_textboxes(event):
     start_textbox.set_val('')
     end_textbox.set_val('')
 
 
-def plot_map_with_osm_background():
-    # Convert the graph to Web Mercator projection for compatibility with map tiles
-    gdf_nodes, gdf_edges = ox.graph_to_gdfs(csuf_campus_map)
-    gdf_nodes = gdf_nodes.to_crs(epsg=3857)
-    gdf_edges = gdf_edges.to_crs(epsg=3857)
-
-    # Initialize the plot
-    fig, ax = plt.subplots(figsize=(10, 10))
-
-    # Plot the edges and nodes on top of the OpenStreetMap tiles
-    gdf_edges.plot(ax=ax, linewidth=1, edgecolor='blue')
-    gdf_nodes.plot(ax=ax, markersize=8, color='red')
-
-    # Add OpenStreetMap tiles as the background
-    ctx.add_basemap(ax, source=ctx.providers.OpenStreetMap.Mapnik)
-
-    # Set title and labels
-    ax.set_title("Cal State Fullerton")
-    ax.set_xlabel("Longitude")
-    ax.set_ylabel("Latitude")
-
-    # Return fig and ax for further customization (hover, GUI)
-    return fig, ax
-
-
-def plot_campus_map_with_nodes():
+def plot_campus():
     # Convert the graph nodes to a GeoDataFrame in Web Mercator
     gdf_nodes, gdf_edges = ox.graph_to_gdfs(csuf_campus_map)
     gdf_nodes = gdf_nodes.to_crs(epsg=3857)
@@ -151,31 +172,6 @@ def plot_campus_map_with_nodes():
     # Return fig and ax for further customization (hover, GUI)
     return fig, ax, campus_locations
 
-def plot_map():
-    # Plot the campus map using osmnx, with custom colors for edges and nodes
-    fig, ax = ox.plot_graph(
-        csuf_campus_map,
-        bgcolor='white',              # Background color
-        node_size=0,                  # Hide default nodes
-        edge_color='blue',            # Set edge color
-        edge_linewidth=0.7,           # Edge line width
-        show=False,                   # Prevent automatic show
-        close=False                   # Keep plot open for additional layers
-    )
-
-    # Plot only the csuf_locations nodes
-    for location, coords in csuf_locations.items():
-        long, lat = coords[1], coords[0]
-        ax.plot(long, lat, 'ro', markersize=8)  # Red markers for locations
-
-    plt.title("Cal State Fullerton Campus Map with Nodes")
-    plt.xlabel("Longitude")
-    plt.ylabel("Latitude")
-
-    # Return figure and axis for further customization
-    return fig, ax
-
-
 def on_hover(fig, ax):
     # Create an annotation for displaying the node name
     annot = ax.annotate(
@@ -212,28 +208,48 @@ def on_hover(fig, ax):
     # Connect the hover event to the figure
     fig.canvas.mpl_connect("motion_notify_event", hover)
 
+def plot_path(graph, path, ax=None):
+    # Ensure we have an existing axis with a background map
+    if ax is None:
+        fig, ax, _ = plot_campus()
+    else:
+        # Clear only previous path lines and start/end annotations on the existing axis
+        for line in ax.get_lines():
+            line.remove()
+        for text in ax.texts:
+            text.remove()  # Clear previous start/end annotations
 
-def plot_path(graph, path):
-    plot_map()
+    if not path or len(path) < 2:
+        print("Path is too short or invalid.")
+        return
 
-    start_y, start_x = graph[path[0]]['coords']
-    end_y, end_x = graph[path[-1]]['coords']
-    coords_x = []
-    coords_y = []
-    for node in path:
-        y, x = graph[node]['coords']
-        coords_x.append(x)
-        coords_y.append(y)
+    # Collect coordinates and convert them to the correct projection if needed
+    coords_list = [(graph[node]['coords'][0], graph[node]['coords'][1]) for node in path if 'coords' in graph[node]]
+    if len(coords_list) < 2:
+        print("Insufficient valid coordinates for plotting.")
+        return
 
-    plt.plot(coords_x, coords_y, '.y-', lw=2)
-    plt.plot(start_x, start_y, 'go', markersize=10)
-    plt.plot(end_x, end_y, 'bo', markersize=10)
+    # Convert coordinates to the projection used by the map if necessary
+    coords_list = convert_coords(coords_list)
+    coords_x, coords_y = zip(*coords_list)
 
-    plt.annotate('Start', (start_x, start_y), textcoords="offset points", xytext=(-20, -20), ha='center', color='black',
-                 bbox=dict(boxstyle="round,pad=0.3", fc="white", lw=2))
-    plt.annotate('End', (end_x, end_y), textcoords="offset points", xytext=(-20, -20), ha='center', color='black',
-                 bbox=dict(boxstyle="round,pad=0.3", fc="white", lw=2))
+    # Plot path as a line and start/end markers
+    ax.plot(coords_x, coords_y, color='cyan', linestyle='-', marker='o', markersize=5, lw=2, zorder=10)
 
+    # Mark start and end points
+    start_x, start_y = coords_x[0], coords_y[0]
+    end_x, end_y = coords_x[-1], coords_y[-1]
+    ax.plot(start_x, start_y, 'go', markersize=10, zorder=11, label='Start')
+    ax.plot(end_x, end_y, 'bo', markersize=10, zorder=11, label='End')
+
+    # Annotate start and end points
+    ax.annotate('Start', (start_x, start_y), textcoords="offset points", xytext=(-10, -10), ha='center', color='black',
+                bbox=dict(boxstyle="round,pad=0.3", fc="white", lw=1), zorder=11)
+    ax.annotate('End', (end_x, end_y), textcoords="offset points", xytext=(-10, -10), ha='center', color='black',
+                bbox=dict(boxstyle="round,pad=0.3", fc="white", lw=1), zorder=11)
+
+    # Ensure the plot is updated with the path
+    ax.figure.canvas.draw_idle()
 
 def plot_location_names(event):
     plt.figure()
@@ -246,10 +262,6 @@ def plot_location_names(event):
     plt.text(0.3, 0.1, ''.join(text), fontsize=10, color='black', transform=plt.gca().transAxes)
     plt.axis('off')
     plt.show()
-
-def clear_textboxes(event):
-    start_textbox.set_val('')
-    end_textbox.set_val('')
 
 def on_hover(fig, ax, csuf_locations):
     # Set up coordinate transformation from lat/long to the map's projection
